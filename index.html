@@ -343,12 +343,13 @@
       if (!viewMode) {
         editor.focus();
         placeCaretAtEnd(editor);
-        updateCaret();
       }
-      keepCaretNearMiddle(editor);
-      syncTranslationScroll();
-      updateCaret();
+      scrollLatestIntoView();
     });
+
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(() => requestAnimationFrame(scrollLatestIntoView));
+    }
 
     function scheduleTranslation() {
       window.clearTimeout(translateTimer);
@@ -383,7 +384,7 @@
     function commitTranslation(text) {
       output.textContent = text;
       localStorage.setItem(STORAGE_KEY_EN, text);
-      requestAnimationFrame(syncTranslationScroll);
+      requestAnimationFrame(scrollLatestIntoView);
     }
 
     function setWritingAccess(enabled) {
@@ -419,7 +420,7 @@
         setWritingAccess(true);
         editor.focus();
         placeCaretAtEnd(editor);
-        updateCaret();
+        scrollLatestIntoView();
       }
     }
 
@@ -559,6 +560,13 @@
 
     function syncTranslationScroll() {
       syncPairedScroll(editor, output, true);
+    }
+
+    function scrollLatestIntoView() {
+      const maxScroll = Math.max(0, editor.scrollHeight - editor.clientHeight);
+      editor.scrollTop = maxScroll;
+      syncTranslationScroll();
+      updateCaret();
     }
 
     function syncPairedScroll(source, target, force = false) {
