@@ -149,6 +149,10 @@
       cursor: default;
     }
 
+    body.author-mode .ko {
+      cursor: text;
+    }
+
     .custom-caret {
       position: absolute;
       left: 6.481481cqw;
@@ -249,7 +253,7 @@
 <body>
   <div class="stage-frame" aria-label="1080 by 1920 writing frame">
     <main class="stage" aria-label="Live Korean and English writing canvas">
-      <div id="koreanEditor" class="text-box ko" contenteditable="true" spellcheck="false" aria-label="Korean live writing"></div>
+      <div id="koreanEditor" class="text-box ko" contenteditable="false" spellcheck="false" aria-label="Korean live writing"></div>
       <div id="englishOutput" class="text-box en" lang="en" aria-label="English live translation"></div>
       <div id="customCaret" class="custom-caret" aria-hidden="true"></div>
       <aside class="annotation" aria-label="Cursor note">
@@ -277,22 +281,24 @@
     const annotationEn = document.getElementById("annotationEn");
     const params = new URLSearchParams(window.location.search);
     const screenMode = params.get("screen") === "1";
-    const viewMode = screenMode || params.get("view") === "1";
+    let writeMode = false;
+    const viewMode = true;
+    let authorShortcutStep = 0;
+    let authorShortcutTimer = 0;
     let writingTimer = 0;
     let translateTimer = 0;
     let translatorReady = null;
     let lastTranslationRequest = 0;
+    let syncingScroll = false;
 
-    if (viewMode) {
-      document.body.classList.add("view-mode");
-      editor.setAttribute("contenteditable", "false");
-      editor.setAttribute("tabindex", "-1");
-    }
+    setWritingAccess(writeMode);
 
     if (screenMode) {
       document.body.classList.add("screen-mode");
       window.addEventListener("wheel", preventManualScroll, { passive: false });
       window.addEventListener("touchmove", preventManualScroll, { passive: false });
+    } else {
+      document.addEventListener("keydown", handleAuthorShortcut);
     }
 
     editor.textContent = localStorage.getItem(STORAGE_KEY_KO) || INITIAL_KO;
@@ -323,6 +329,8 @@
       caret.classList.remove("is-visible", "is-writing");
     });
     editor.addEventListener("paste", pastePlainText);
+    editor.addEventListener("scroll", () => syncPairedScroll(editor, output));
+    output.addEventListener("scroll", () => syncPairedScroll(output, editor));
     document.addEventListener("selectionchange", () => {
       if (document.activeElement === editor) {
         updateCaret();
@@ -374,6 +382,49 @@
       output.textContent = text;
       localStorage.setItem(STORAGE_KEY_EN, text);
       requestAnimationFrame(syncTranslationScroll);
+    }
+
+    function setWritingAccess(enabled) {
+      writeMode = enabled;
+      document.body.classList.toggle("author-mode", enabled);
+      document.body.classList.toggle("view-mode", !enabled);
+      editor.setAttribute("contenteditable", enabled ? "true" : "false");
+
+      if (enabled) {
+        editor.removeAttribute("tabindex");
+      } else {
+        editor.setAttribute("tabindex", "-1");
+      }
+    }
+
+    function handleAuthorShortcut(event) {
+      if (writeMode || !event.metaKey) {
+        return;
+      }
+
+      const key = event.key.toLowerCase();
+      if (key === "y") {
+        event.preventDefault();
+        authorShortcutStep = 1;
+        window.clearTimeout(authorShortcutTimer);
+        authorShortcutTimer = window.setTimeout(resetAuthorShortcut, 1200);
+        return;
+      }
+
+      if (key === "j" && authorShortcutStep === 1) {
+        event.preventDefault();
+        resetAuthorShortcut();
+        setWritingAccess(true);
+        editor.focus();
+        placeCaretAtEnd(editor);
+        updateCaret();
+      }
+    }
+
+    function resetAuthorShortcut() {
+      authorShortcutStep = 0;
+      window.clearTimeout(authorShortcutTimer);
+      authorShortcutTimer = 0;
     }
 
     async function translatePreservingLineBreaks(text) {
@@ -505,12 +556,23 @@
     }
 
     function syncTranslationScroll() {
-      if (output.scrollHeight <= output.clientHeight) {
-        output.scrollTop = 0;
+      syncPairedScroll(editor, output, true);
+    }
+
+    function syncPairedScroll(source, target, force = false) {
+      if (syncingScroll && !force) {
         return;
       }
 
-      output.scrollTop = Math.max(0, output.scrollHeight - output.clientHeight / 2);
+      const sourceMax = source.scrollHeight - source.clientHeight;
+      const targetMax = target.scrollHeight - target.clientHeight;
+      const ratio = sourceMax > 0 ? source.scrollTop / sourceMax : 0;
+
+      syncingScroll = true;
+      target.scrollTop = targetMax > 0 ? ratio * targetMax : 0;
+      requestAnimationFrame(() => {
+        syncingScroll = false;
+      });
     }
 
     function updateCaret() {
@@ -532,8 +594,10 @@
       }
 
       const scale = editorRect.width / 940;
-      const x = rect.left - editorRect.left + 22 * scale;
-      const y = rect.top - editorRect.top + 26 * scale;
+      const xOffset = document.body.classList.contains("author-mode") ? 6 : 22;
+      const yOffset = document.body.classList.contains("author-mode") ? 24 : 26;
+      const x = rect.left - editorRect.left + xOffset * scale;
+      const y = rect.top - editorRect.top + yOffset * scale;
       caret.style.transform = `translate(${x}px, ${y}px)`;
     }
 
