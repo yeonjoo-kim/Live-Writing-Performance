@@ -459,21 +459,57 @@
     }
 
     async function unlockAuthorMode() {
-      if (hasFirebaseConfig()) {
-        await initRealtime();
-        const user = firebaseAuth.currentUser || (await signInWithPopupFn(firebaseAuth, googleProvider)).user;
-
-        if (!isAuthorUser(user)) {
-          console.warn("This Google account is not allowed to write to this performance.");
-          return;
-        }
+      if (location.protocol === "file:") {
+        showAuthorError("Firebase Google login cannot run from a file:// address. Open http://localhost:8080/index.html or your GitHub Pages URL instead.");
+        return;
       }
 
-      setWritingAccess(true);
-      editor.focus();
-      placeCaretAtEnd(editor);
-      scrollLatestIntoView();
-      queueRealtimePublish(0);
+      try {
+        if (hasFirebaseConfig()) {
+          await initRealtime();
+          const user = firebaseAuth.currentUser || (await signInWithPopupFn(firebaseAuth, googleProvider)).user;
+
+          if (!isAuthorUser(user)) {
+            showAuthorError("This Google account is not allowed to write to this performance.");
+            return;
+          }
+        }
+
+        setWritingAccess(true);
+        editor.focus();
+        placeCaretAtEnd(editor);
+        scrollLatestIntoView();
+        queueRealtimePublish(0);
+      } catch (error) {
+        showAuthorError(getAuthorLoginMessage(error));
+      }
+    }
+
+    function showAuthorError(message) {
+      console.warn(message);
+      window.alert(message);
+    }
+
+    function getAuthorLoginMessage(error) {
+      const code = error && error.code;
+
+      if (code === "auth/operation-not-allowed") {
+        return "Google login is not enabled yet. In Firebase Console, enable Authentication > Sign-in method > Google.";
+      }
+
+      if (code === "auth/unauthorized-domain") {
+        return "This domain is not authorized for Firebase login. Add localhost and your GitHub Pages domain in Firebase Authentication > Settings > Authorized domains.";
+      }
+
+      if (code === "auth/popup-closed-by-user") {
+        return "The Google login popup was closed before login finished. Please try again and complete the Google login.";
+      }
+
+      if (code === "auth/popup-blocked") {
+        return "The browser blocked the Google login popup. Please allow popups for this site.";
+      }
+
+      return `Author login failed${code ? ` (${code})` : ""}.`;
     }
 
     function resetAuthorShortcut() {
