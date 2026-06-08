@@ -125,7 +125,6 @@
       word-break: keep-all;
       caret-color: transparent;
       cursor: text;
-      -webkit-user-modify: read-write-plaintext-only;
     }
 
     .en {
@@ -151,6 +150,7 @@
 
     body.author-mode .ko {
       cursor: text;
+      -webkit-user-modify: read-write-plaintext-only;
     }
 
     .custom-caret {
@@ -326,7 +326,8 @@
       updateCaret();
     });
     editor.addEventListener("blur", () => {
-      caret.classList.remove("is-visible", "is-writing");
+      caret.classList.remove("is-writing");
+      updateCaret();
     });
     editor.addEventListener("paste", pastePlainText);
     editor.addEventListener("scroll", () => syncPairedScroll(editor, output));
@@ -346,6 +347,7 @@
       }
       keepCaretNearMiddle(editor);
       syncTranslationScroll();
+      updateCaret();
     });
 
     function scheduleTranslation() {
@@ -577,12 +579,12 @@
 
     function updateCaret() {
       const selection = window.getSelection();
-      if (document.activeElement !== editor || !selection.rangeCount || !editor.contains(selection.anchorNode)) {
-        caret.classList.remove("is-visible");
-        return;
-      }
-
-      const range = selection.getRangeAt(0).cloneRange();
+      const useSelection = document.activeElement === editor
+        && selection.rangeCount
+        && editor.contains(selection.anchorNode);
+      const range = useSelection
+        ? selection.getRangeAt(0).cloneRange()
+        : getEndRange(editor);
       range.collapse(true);
       const rect = getRangeRect(range);
       const editorRect = editor.getBoundingClientRect();
@@ -599,6 +601,13 @@
       const x = rect.left - editorRect.left + xOffset * scale;
       const y = rect.top - editorRect.top + yOffset * scale;
       caret.style.transform = `translate(${x}px, ${y}px)`;
+    }
+
+    function getEndRange(element) {
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      range.collapse(false);
+      return range;
     }
 
     function getRangeRect(range) {
