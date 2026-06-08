@@ -266,13 +266,24 @@
     </main>
   </div>
 
-  <script>
+  <script type="module">
     const INITIAL_KO = "이 글은 잉여로서의 디자인, 디자인으로서의 잉여에 대한 개인적인 소견을 담는다. 글을 쓰는 동시에 이 화면에 글이 표시되며, 이 디지털 시계 환경을 플랫폼 삼아 라이브로 송출되지만 그게 언제, 몇 시 몇 분일지는 아무도 모른다.";
     const INITIAL_EN = "This piece shares my personal thoughts on design as surplus, and surplus as design. As I write, the words show up on this screen in real time, and they will be streamed live through this digital clock environment as a platform. But nobody knows when that will happen, down to the hour or minute.";
     const ANNOTATION_KO = "이 글은 잉여로서의 디자인, 디자인으로서의 잉여에 대한 개인적인 소견을 담는다. 글을 쓰는 동시에 이 화면에 글이 표시되며, 이 디지털 시계 환경을 플랫폼 삼아 라이브로 송출되지만 그게 언제, 몇 시 몇 분일지는 아무도 모른다. 이 커서는 1초마다 깜빡이고 있다.";
     const ANNOTATION_EN = "This text shares my personal thoughts on design as surplus, and surplus as design. As I write, the words appear on this screen, using this digital clock environment as a platform. It will be streamed live, but nobody knows when, down to the hour or minute. This cursor is blinking every second.";
     const STORAGE_KEY_KO = "live-writing-ko-v5";
     const STORAGE_KEY_EN = "live-writing-en-v5";
+    const FIREBASE_CONFIG = {
+      apiKey: "AIzaSyCxdO-0aYU1JVdCKzR3zwfubAh_gHiRWHU",
+      authDomain: "live-typing-on-design.firebaseapp.com",
+      databaseURL: "https://live-typing-on-design-default-rtdb.asia-southeast1.firebasedatabase.app/",
+      projectId: "live-typing-on-design",
+      storageBucket: "live-typing-on-design.firebasestorage.app",
+      messagingSenderId: "182859072415",
+      appId: "1:182859072415:web:db5aa9a6bd903ff1e473aa"
+    };
+    const AUTHOR_EMAIL = "gondry3261@snu.ac.kr";
+    const LIVE_STATE_PATH = "liveWritingPerformance/current";
 
     const editor = document.getElementById("koreanEditor");
     const output = document.getElementById("englishOutput");
@@ -287,9 +298,20 @@
     let authorShortcutTimer = 0;
     let writingTimer = 0;
     let translateTimer = 0;
+    let publishTimer = 0;
     let translatorReady = null;
     let lastTranslationRequest = 0;
     let syncingScroll = false;
+    let applyingRemoteState = false;
+    let currentCaretBase = null;
+    let remoteCaretBase = null;
+    let realtimeStateRef = null;
+    let realtimeSet = null;
+    let realtimeServerTimestamp = null;
+    let firebaseAuth = null;
+    let googleProvider = null;
+    let signInWithPopupFn = null;
+    let realtimeInitialized = false;
 
     setWritingAccess(writeMode);
 
@@ -305,6 +327,9 @@
     output.textContent = localStorage.getItem(STORAGE_KEY_EN) || INITIAL_EN;
     annotationKo.textContent = ANNOTATION_KO;
     annotationEn.textContent = ANNOTATION_EN;
+    initRealtime().catch((error) => {
+      console.warn("Realtime mode is unavailable.", error);
+    });
 
     editor.addEventListener("input", () => {
       localStorage.setItem(STORAGE_KEY_KO, editor.innerText);
@@ -313,14 +338,19 @@
       setWritingState();
       scheduleTranslation();
       updateCaret();
+      queueRealtimePublish();
     });
 
     editor.addEventListener("keydown", setWritingState);
     editor.addEventListener("keyup", () => {
       keepCaretNearMiddle(editor);
       updateCaret();
+      queueRealtimePublish();
     });
-    editor.addEventListener("click", updateCaret);
+    editor.addEventListener("click", () => {
+      updateCaret();
+      queueRealtimePublish();
+    });
     editor.addEventListener("focus", () => {
       caret.classList.add("is-visible");
       updateCaret();
@@ -330,8 +360,14 @@
       updateCaret();
     });
     editor.addEventListener("paste", pastePlainText);
-    editor.addEventListener("scroll", () => syncPairedScroll(editor, output));
-    output.addEventListener("scroll", () => syncPairedScroll(output, editor));
+    editor.addEventListener("scroll", () => {
+      syncPairedScroll(editor, output);
+      queueRealtimePublish(80);
+    });
+    output.addEventListener("scroll", () => {
+      syncPairedScroll(output, editor);
+      queueRealtimePublish(80);
+    });
     document.addEventListener("selectionchange", () => {
       if (document.activeElement === editor) {
         updateCaret();
@@ -384,6 +420,7 @@
     function commitTranslation(text) {
       output.textContent = text;
       localStorage.setItem(STORAGE_KEY_EN, text);
+      queueRealtimePublish();
       requestAnimationFrame(scrollLatestIntoView);
     }
 
@@ -417,17 +454,147 @@
       if (key === "j" && authorShortcutStep === 1) {
         event.preventDefault();
         resetAuthorShortcut();
-        setWritingAccess(true);
-        editor.focus();
-        placeCaretAtEnd(editor);
-        scrollLatestIntoView();
+        unlockAuthorMode();
       }
+    }
+
+    async function unlockAuthorMode() {
+      if (hasFirebaseConfig()) {
+        await initRealtime();
+        const user = firebaseAuth.currentUser || (await signInWithPopupFn(firebaseAuth, googleProvider)).user;
+
+        if (!isAuthorUser(user)) {
+          console.warn("This Google account is not allowed to write to this performance.");
+          return;
+        }
+      }
+
+      setWritingAccess(true);
+      editor.focus();
+      placeCaretAtEnd(editor);
+      scrollLatestIntoView();
+      queueRealtimePublish(0);
     }
 
     function resetAuthorShortcut() {
       authorShortcutStep = 0;
       window.clearTimeout(authorShortcutTimer);
       authorShortcutTimer = 0;
+    }
+
+    async function initRealtime() {
+      if (realtimeInitialized || !hasFirebaseConfig()) {
+        return;
+      }
+
+      realtimeInitialized = true;
+      const [
+        appModule,
+        databaseModule,
+        authModule
+      ] = await Promise.all([
+        import("https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js"),
+        import("https://www.gstatic.com/firebasejs/10.12.5/firebase-database.js"),
+        import("https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js")
+      ]);
+
+      const app = appModule.initializeApp(FIREBASE_CONFIG);
+      const database = databaseModule.getDatabase(app);
+      firebaseAuth = authModule.getAuth(app);
+      googleProvider = new authModule.GoogleAuthProvider();
+      signInWithPopupFn = authModule.signInWithPopup;
+      realtimeSet = databaseModule.set;
+      realtimeServerTimestamp = databaseModule.serverTimestamp;
+      realtimeStateRef = databaseModule.ref(database, LIVE_STATE_PATH);
+
+      databaseModule.onValue(realtimeStateRef, (snapshot) => {
+        const state = snapshot.val();
+        if (state) {
+          applyRemoteState(state);
+        }
+      });
+    }
+
+    function hasFirebaseConfig() {
+      return Boolean(
+        FIREBASE_CONFIG.apiKey
+        && FIREBASE_CONFIG.authDomain
+        && FIREBASE_CONFIG.databaseURL
+        && FIREBASE_CONFIG.projectId
+        && FIREBASE_CONFIG.appId
+      );
+    }
+
+    function isAuthorUser(user) {
+      return Boolean(user && AUTHOR_EMAIL && user.email === AUTHOR_EMAIL);
+    }
+
+    function queueRealtimePublish(delay = 120) {
+      if (!writeMode || !realtimeStateRef || !realtimeSet || applyingRemoteState) {
+        return;
+      }
+
+      window.clearTimeout(publishTimer);
+      publishTimer = window.setTimeout(publishRealtimeState, delay);
+    }
+
+    async function publishRealtimeState() {
+      if (!writeMode || !realtimeStateRef || !realtimeSet) {
+        return;
+      }
+
+      try {
+        await realtimeSet(realtimeStateRef, getCurrentLiveState());
+      } catch (error) {
+        console.warn("Realtime publish failed.", error);
+      }
+    }
+
+    function getCurrentLiveState() {
+      return {
+        koreanText: editor.innerText,
+        englishText: output.textContent,
+        editorScrollRatio: getScrollRatio(editor),
+        outputScrollRatio: getScrollRatio(output),
+        caret: currentCaretBase,
+        updatedAt: realtimeServerTimestamp ? realtimeServerTimestamp() : Date.now()
+      };
+    }
+
+    function applyRemoteState(state) {
+      if (writeMode) {
+        return;
+      }
+
+      applyingRemoteState = true;
+      if (typeof state.koreanText === "string" && editor.textContent !== state.koreanText) {
+        editor.textContent = state.koreanText;
+      }
+
+      if (typeof state.englishText === "string" && output.textContent !== state.englishText) {
+        output.textContent = state.englishText;
+      }
+
+      localStorage.setItem(STORAGE_KEY_KO, editor.innerText);
+      localStorage.setItem(STORAGE_KEY_EN, output.textContent);
+      remoteCaretBase = state.caret || null;
+
+      requestAnimationFrame(() => {
+        setScrollRatio(editor, state.editorScrollRatio);
+        setScrollRatio(output, state.outputScrollRatio);
+        updateCaret();
+        applyingRemoteState = false;
+      });
+    }
+
+    function getScrollRatio(element) {
+      const maxScroll = element.scrollHeight - element.clientHeight;
+      return maxScroll > 0 ? element.scrollTop / maxScroll : 0;
+    }
+
+    function setScrollRatio(element, ratio = 1) {
+      const maxScroll = element.scrollHeight - element.clientHeight;
+      element.scrollTop = maxScroll > 0 ? maxScroll * ratio : 0;
     }
 
     async function translatePreservingLineBreaks(text) {
@@ -563,6 +730,10 @@
     }
 
     function scrollLatestIntoView() {
+      if (applyingRemoteState) {
+        return;
+      }
+
       const maxScroll = Math.max(0, editor.scrollHeight - editor.clientHeight);
       editor.scrollTop = maxScroll;
       syncTranslationScroll();
@@ -586,6 +757,12 @@
     }
 
     function updateCaret() {
+      if (!writeMode && remoteCaretBase) {
+        setCaretTransform(remoteCaretBase);
+        caret.classList.add("is-visible");
+        return;
+      }
+
       const selection = window.getSelection();
       const useSelection = document.activeElement === editor
         && selection.rangeCount
@@ -608,7 +785,25 @@
       const yOffset = document.body.classList.contains("author-mode") ? 24 : 26;
       const x = rect.left - editorRect.left + xOffset * scale;
       const y = rect.top - editorRect.top + yOffset * scale;
-      caret.style.transform = `translate(${x}px, ${y}px)`;
+      const basePosition = {
+        x: x / scale,
+        y: y / scale
+      };
+      setCaretTransform(basePosition);
+    }
+
+    function setCaretTransform(basePosition) {
+      if (!basePosition) {
+        return;
+      }
+
+      const editorRect = editor.getBoundingClientRect();
+      const scale = editorRect.width / 940;
+      currentCaretBase = {
+        x: basePosition.x,
+        y: basePosition.y
+      };
+      caret.style.transform = `translate(${basePosition.x * scale}px, ${basePosition.y * scale}px)`;
     }
 
     function getEndRange(element) {
